@@ -1,7 +1,9 @@
 // Emberwing Ring Run — hand-in program (Node 22, standard library only).
 // The game itself is the static site under game/ (game/index.html plus its
-// ES modules, no library, no network request). This program copies game/
-// and screenshots/ from beside this file to /output and writes
+// ES modules, no library, no network request): three sorties (Ring Run,
+// Slalom Sprint, Cargo Drop) over a dressed island, with a 3D-projected
+// aircraft, particle effects, combo scoring and wind. This program copies
+// game/ and screenshots/ from beside this file to /output and writes
 // /output/dossier.json with buildDossier from the vendored make.fun
 // library, exactly as the bounty requires.
 //
@@ -9,13 +11,23 @@
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+
+// Refuse to hand in a broken entry: the game shell and at least one
+// screenshot must exist beside this file before anything is copied.
+if (!existsSync(join(here, 'game', 'index.html'))) {
+  throw new Error('game/index.html missing — nothing to hand in');
+}
+const shotDir = join(here, 'screenshots');
+if (!existsSync(shotDir) || readdirSync(shotDir).length === 0) {
+  throw new Error('screenshots/ is empty — capture the cover shots first');
+}
 
 mkdirSync(out, { recursive: true });
 cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });

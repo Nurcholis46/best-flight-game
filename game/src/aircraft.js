@@ -28,9 +28,11 @@ export function newAircraft() {
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 // Advance the aircraft by dt seconds. `controls` comes from input.js.
+// `wind` (optional, from missions.js windAt) is a sideways push in m/s that
+// grows with altitude; omit it and the model behaves exactly as before.
 // Returns an event string when something notable happens this step:
 // 'takeoff' | 'landed' | 'perfect' | 'crash' | 'ditch' | null.
-export function stepAircraft(a, controls, dt) {
+export function stepAircraft(a, controls, dt, wind = null) {
   if (a.crashed) return null;
 
   // Throttle lever.
@@ -72,6 +74,13 @@ export function stepAircraft(a, controls, dt) {
   a.x += vx * dt;
   a.z += vz * dt;
   a.y += a.vy * dt;
+  // Wind drift: gentle at the strip, a real push up high. The plane's own
+  // velocity is untouched — the air mass itself moves.
+  if (wind && a.airborne) {
+    const altFactor = Math.min(1, Math.max(0.15, a.y / 220));
+    a.x += wind.x * altFactor * dt;
+    a.z += wind.z * altFactor * dt;
+  }
 
   const ground = groundHeight(a.x, a.z);
   const gearHeight = 2.2;

@@ -1,13 +1,18 @@
 // config.js — every tuning number for Emberwing Ring Run in one place.
 // Distances are in metres, speeds in metres per second unless noted.
+// Three missions share this tuning: Ring Run (12 rings), Slalom Sprint
+// (8 low pylon gates) and Cargo Drop (crate onto a ground target).
 
 export const WORLD = {
   seaLevel: 0,
-  terrainStep: 60,          // metres between terrain grid points
-  terrainRadius: 2600,      // how far terrain is drawn around the plane
+  terrainStep: 60,          // legacy reference step (render uses 3 grids)
+  terrainRadius: 3000,      // how far terrain is drawn around the plane
   runway: { x: 0, z: 0, heading: 0, length: 900, width: 46 },
   ringCount: 12,
   ringRadius: 26,
+  // Fixed sun direction (normalised in render.js) for terrain lighting.
+  sunDir: { x: -0.55, y: 0.72, z: 0.42 },
+  horizon: [207, 232, 247], // haze colour distant terrain blends toward
 };
 
 export const PLANE = {
@@ -25,18 +30,25 @@ export const PLANE = {
 };
 
 export const GAME = {
-  startTime: 150,           // seconds on the clock at takeoff
+  startTime: 150,           // seconds on the clock at takeoff (Ring Run)
   ringTimeBonus: 12,        // seconds added per ring
   ringScore: 250,
   centreBonus: 100,         // extra points for a dead-centre ring pass
+  gateScore: 200,           // Slalom Sprint gate
+  gateTimeBonus: 6,         // seconds added per slalom gate
+  slalomTime: 95,           // shorter clock for the sprint
+  cargoTime: 130,           // clock for Cargo Drop
+  cargoMaxScore: 1000,      // dead-centre crate score, falls off with distance
+  cargoFalloff: 7,          // points lost per metre from the target centre
+  comboWindow: 12,          // seconds between scores to keep a combo alive
   landingScore: 500,
   perfectLandingScore: 900,
   maxHull: 100,
 };
 
 export const COLORS = {
-  skyTop: '#2a4d8f',
-  skyMid: '#6fa8dc',
+  skyTop: '#24508f',
+  skyMid: '#5f9fd8',
   skyLow: '#cfe8f7',
   sun: '#fff3c4',
   sea: '#2e6da8',

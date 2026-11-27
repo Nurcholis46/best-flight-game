@@ -2,7 +2,8 @@
 // Terrain is a smooth analytic heightfield (layered sines), flattened around
 // the runway so takeoffs and landings have a fair strip of ground. The same
 // height function drives both rendering and collision, so what you see is
-// exactly what you can hit.
+// exactly what you can hit. A second, smaller island to the north-east and
+// a snowy mountain massif on the main island keep the horizon interesting.
 
 import { WORLD } from './config.js';
 
@@ -23,6 +24,18 @@ function islandMask(x, z) {
   return fall * fall * (3 - 2 * fall); // smoothstep
 }
 
+// A smaller sister island north-east, plus a high massif on the main island
+// whose peaks carry snow. Both are pure heightfield additions.
+function extraLand(x, z) {
+  const d2 = Math.hypot(x - 2600, z + 2300);
+  const f2 = Math.max(0, 1 - d2 / 1100);
+  const sister = f2 * f2 * (3 - 2 * f2) * (34 + swell(x * 1.3, z * 1.3) * 0.35);
+  const dm = Math.hypot(x + 900, z + 1500);
+  const fm = Math.max(0, 1 - dm / 1250);
+  const massif = fm * fm * (3 - 2 * fm) * 95;
+  return sister + massif;
+}
+
 // Keep the runway area flat at a gentle plateau height.
 function runwayFlatten(x, z, h) {
   const r = WORLD.runway;
@@ -35,7 +48,7 @@ function runwayFlatten(x, z, h) {
 
 export function terrainHeight(x, z) {
   const mask = islandMask(x, z);
-  const base = mask * (48 + swell(x, z) * 0.5) - 8;
+  const base = mask * (48 + swell(x, z) * 0.5) - 8 + extraLand(x, z);
   return runwayFlatten(x, z, base);
 }
 
@@ -98,4 +111,39 @@ export function terrainColor(h, slope) {
   if (h < 52) return slope > 0.6 ? '#7d776c' : '#3f7d44';
   if (h < 78) return '#8a8378';              // bare rock
   return '#f4f7fa';                          // snow caps
+}
+
+// Smooth height-band colour as [r,g,b]: beach -> grass -> forest -> rock ->
+// snow, blended continuously so the mesh never shows checkerboard steps.
+// Steep slopes lean toward bare rock at any height.
+const BANDS = [
+  [0.0, [217, 194, 122]], [3, [217, 194, 122]], [7, [133, 178, 96]],
+  [22, [93, 168, 92]], [34, [63, 125, 68]], [52, [96, 110, 78]],
+  [68, [138, 131, 120]], [86, [176, 176, 176]], [100, [244, 247, 250]],
+];
+export function terrainColorRGB(h, slope) {
+  let i = 0;
+  while (i < BANDS.length - 2 && h > BANDS[i + 1][0]) i++;
+  const [h0, c0] = BANDS[i];
+  const [h1, c1] = BANDS[i + 1];
+  const t = Math.max(0, Math.min(1, (h - h0) / Math.max(1, h1 - h0)));
+  let r = c0[0] + (c1[0] - c0[0]) * t;
+  let g = c0[1] + (c1[1] - c0[1]) * t;
+  let b = c0[2] + (c1[2] - c0[2]) * t;
+  const rockiness = Math.max(0, Math.min(0.65, (slope - 0.45) * 1.4));
+  r += (138 - r) * rockiness; g += (131 - g) * rockiness; b += (120 - b) * rockiness;
+  return [r, g, b];
+}
+
+// The cargo-drop clearing: a flat-ish meadow west of the strip, marked in
+// missions.js. Exported so scenery and the minimap agree on the spot.
+export const CARGO_TARGET = { x: -850, z: 780 };
+
+// Deterministic seeded random generator shared by scenery placement.
+export function seededRandom(seed) {
+  let s = (seed * 2654435761) % 4294967296;
+  return () => {
+    s = (s * 1664525 + 1013904223) % 4294967296;
+    return s / 4294967296;
+  };
 }

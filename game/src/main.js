@@ -1,8 +1,11 @@
 // main.js — Emberwing Ring Run: game loop, mission logic and screens.
-// Take off from the island strip, fly the 12-ring course in order before
-// the clock runs out, mind the fuel gauge, and land back on the runway
-// for the bonus. Screenshot mode (?shot=start|play|cockpit|end) poses the
-// aircraft with a simple autopilot so the cover shots show real gameplay.
+// Three sorties from the island strip: Ring Run (12 rings), Slalom Sprint
+// (8 low pylon gates) and Cargo Drop (crate onto a ground target), chosen
+// with 1/2/3 on the title screen. Combos chain quick scores, wind pushes
+// the plane about, and particles mark every takeoff, ring and touchdown.
+// Screenshot mode (?shot=cover|cockpit|slalom|landing, plus legacy
+// start|play|end) poses the aircraft with a simple autopilot so the cover
+// shots show real gameplay.
 
 import { GAME } from './config.js';
 import { controls, installInput, wasPressed, clearPresses } from './input.js';
@@ -11,6 +14,15 @@ import { buildCourse, buildClouds } from './world.js';
 import { newAircraft, stepAircraft } from './aircraft.js';
 import { makeCamera, updateCamera, renderScene } from './render.js';
 import { drawHud, drawTitle, drawEnd, drawPaused } from './hud.js';
+import { buildScenery } from './scenery.js';
+import {
+  newEffects, ringBurst, dustPuff, splash, crashPuff, targetSparkle,
+  emitContinuous, stepEffects,
+} from './effects.js';
+import {
+  MISSIONS, buildSlalom, buildCargoTarget, newCrate, dropCrate, stepCrate,
+  scoreCrate, newCombo, comboHit, stepCombo, windAt, gateSide, gatePassed,
+} from './missions.js';
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
@@ -37,11 +49,21 @@ const state = {
   phase: 'title', // title | play | pause | end
   plane: newAircraft(),
   rings: buildCourse(),
+  gates: buildSlalom(),
+  cargoTarget: buildCargoTarget(),
+  crate: newCrate(),
   clouds: buildClouds(7),
+  scenery: buildScenery(),
+  effects: newEffects(),
+  missionId: 'rings',
   nextRing: 0,
   ringsDone: 0,
+  nextGate: 0,
+  gatesDone: 0,
   score: 0,
   timeLeft: GAME.startTime,
+  combo: newCombo(),
+  wind: windAt(0),
   message: '',
   messageUntil: 0,
   won: false,
@@ -51,6 +73,8 @@ const state = {
   cameraMode: 'chase',
   ringScreen: null,
   prevRingSide: 0,
+  prevGateSide: 0,
+  dropPressed: false,
 };
 const camera = makeCamera();
 
@@ -60,17 +84,29 @@ function say(text, now, seconds = 2.2) {
   statusEl.textContent = text;
 }
 
+function missionDef() {
+  return MISSIONS.find((m) => m.id === state.missionId) || MISSIONS[0];
+}
+
 function resetFlight() {
   state.plane = newAircraft();
   state.rings = buildCourse();
+  state.gates = buildSlalom();
+  state.cargoTarget = buildCargoTarget();
+  state.crate = newCrate();
+  state.effects = newEffects();
   state.nextRing = 0;
   state.ringsDone = 0;
+  state.nextGate = 0;
+  state.gatesDone = 0;
   state.score = 0;
-  state.timeLeft = GAME.startTime;
+  state.timeLeft = missionDef().startTime;
+  state.combo = newCombo();
   state.won = false;
   state.prevRingSide = 0;
+  state.prevGateSide = 0;
   camera.x = state.plane.x; camera.y = state.plane.y + 6; camera.z = state.plane.z + 17;
-  camera.yaw = 0; camera.pitch = 0; camera.roll = 0;
+  camera.yaw = 0; camera.pitch = 0; camera.roll = 0; camera.shake = 0;
 }
 
 function endFlight(won, title, line) {
@@ -86,8 +122,13 @@ function endFlight(won, title, line) {
   if (won) fanfare();
 }
 
-// Which side of the next ring's plane is the aircraft on? A sign flip while
-// close to the centre means a pass.
+function objectivesDone() {
+  if (state.missionId === 'slalom') return state.nextGate >= state.gates.length;
+  if (state.missionId === 'cargo') return state.crate.state === 'landed';
+  return state.nextRing >= state.rings.length;
+}
+
+// Which side of the next ring's plane is the aircraft on?
 function ringSide(ring, a) {
   const nx = Math.sin(ring.heading), nz = -Math.cos(ring.heading);
   return (a.x - ring.x) * nx + (a.z - ring.z) * nz;
@@ -100,22 +141,52 @@ function checkRing(now) {
   const side = ringSide(ring, a);
   const dist = Math.hypot(a.x - ring.x, a.y - ring.y, a.z - ring.z);
   if (state.prevRingSide !== 0 && Math.sign(side) !== Math.sign(state.prevRingSide) && dist < ring.radius + 14) {
-    const centreDist = Math.hypot(a.y - ring.y, dist);
     const centred = Math.abs(a.y - ring.y) < 7 && dist < ring.radius * 0.55;
     ring.done = true;
     state.ringsDone += 1;
     state.nextRing += 1;
     state.prevRingSide = 0;
-    state.score += GAME.ringScore + (centred ? GAME.centreBonus : 0);
+    const mult = comboHit(state.combo);
+    const gained = (GAME.ringScore + (centred ? GAME.centreBonus : 0)) * mult;
+    state.score += gained;
     state.timeLeft += GAME.ringTimeBonus;
     ringChime(centred);
-    say(centred ? `DEAD CENTRE! +${GAME.ringScore + GAME.centreBonus}` : `RING ${state.ringsDone} +${GAME.ringScore}`, now);
+    ringBurst(state.effects, ring);
+    say(centred ? `DEAD CENTRE! +${gained}` : `RING ${state.ringsDone} +${gained}${mult > 1 ? ` (x${mult})` : ''}`, now);
     if (state.nextRing >= state.rings.length) {
       say('ALL RINGS! Land on the strip for the bonus', now, 3.5);
     }
     return;
   }
   state.prevRingSide = side;
+}
+
+function checkGate(now) {
+  const gate = state.gates[state.nextGate];
+  if (!gate) return;
+  const a = state.plane;
+  const side = gateSide(gate, a);
+  if (state.prevGateSide !== 0 && Math.sign(side) !== Math.sign(state.prevGateSide)) {
+    if (gatePassed(gate, a)) {
+      gate.done = true;
+      state.gatesDone += 1;
+      state.nextGate += 1;
+      state.prevGateSide = 0;
+      const mult = comboHit(state.combo);
+      const gained = GAME.gateScore * mult;
+      state.score += gained;
+      state.timeLeft += GAME.gateTimeBonus;
+      ringChime(false);
+      ringBurst(state.effects, { x: gate.x, y: gate.y, z: gate.z });
+      say(`GATE ${state.gatesDone} +${gained}${mult > 1 ? ` (x${mult})` : ''}`, now);
+      if (state.nextGate >= state.gates.length) {
+        say('ALL GATES! Land on the strip for the bonus', now, 3.5);
+      }
+      return;
+    }
+    say('MISSED — between the pylons, under the cap!', now, 1.6);
+  }
+  state.prevGateSide = side;
 }
 
 function applyMouseSteer() {
@@ -125,46 +196,94 @@ function applyMouseSteer() {
   if (Math.abs(controls.mouseY) > dead) controls.pitch = Math.max(-1, Math.min(1, -controls.mouseY * 1.4));
 }
 
-// A gentle autopilot used only for screenshot poses: point the nose at the
-// next ring and keep the speed healthy.
+// A gentle autopilot used only for screenshot poses.
 function autopilot() {
   const a = state.plane;
-  const ring = state.rings[Math.min(state.nextRing, state.rings.length - 1)];
-  const wantHeading = Math.atan2(ring.x - a.x, -(ring.z - a.z));
+  let target = null;
+  if (state.missionId === 'slalom') target = state.gates[Math.min(state.nextGate, state.gates.length - 1)];
+  else if (state.missionId === 'cargo') target = state.cargoTarget;
+  else target = state.rings[Math.min(state.nextRing, state.rings.length - 1)];
+  // Head home to the strip on a gentle glide, never a dive.
+  if (objectivesDone()) target = { x: 0, y: Math.max(24, a.y - 10), z: 0 };
+  if (!target) return;
+  const ty = target.y !== undefined ? target.y + (state.missionId === 'cargo' ? 60 : 0) : a.y;
+  const wantHeading = Math.atan2(target.x - a.x, -(target.z - a.z));
   let dh = wantHeading - a.heading;
   while (dh > Math.PI) dh -= Math.PI * 2;
   while (dh < -Math.PI) dh += Math.PI * 2;
   controls.roll = Math.max(-1, Math.min(1, dh * 1.15));
-  const dy = ring.y - a.y;
-  controls.pitch = Math.max(-1, Math.min(1, dy * 0.012));
+  controls.pitch = Math.max(-1, Math.min(1, (ty - a.y) * 0.012));
   controls.throttleUp = a.throttle < 0.82;
   controls.throttleDown = false;
 }
 
 function stepPlay(dt, now) {
-  if (shotMode) autopilot();
-  else applyMouseSteer();
-  const event = stepAircraft(state.plane, controls, dt);
+  state.wind = windAt(now);
+  // The landing pose flies itself: no autopilot, so it touches down and
+  // rolls out with dust instead of climbing away again.
+  if (shotMode && shotMode !== 'landing') autopilot();
+  else if (!shotMode) applyMouseSteer();
+  const event = stepAircraft(state.plane, controls, dt, state.wind);
   const a = state.plane;
 
-  if (event === 'takeoff') say('AIRBORNE — chase the gold ring!', now);
+  if (event === 'takeoff') {
+    say('AIRBORNE — chase the gold marker!', now);
+    dustPuff(state.effects, a.x, a.y - 2, a.z, 0.8);
+  }
   if (event === 'perfect' || event === 'landed') {
     thud(false);
+    dustPuff(state.effects, a.x, a.y - 2, a.z, event === 'perfect' ? 0.7 : 1.2);
+    if (event === 'landed') camera.shake = Math.max(camera.shake, 0.6);
     const bonus = event === 'perfect' ? GAME.perfectLandingScore : GAME.landingScore;
-    if (state.nextRing >= state.rings.length) {
+    if (objectivesDone()) {
       state.score += bonus;
-      endFlight(true, 'COURSE COMPLETE!', event === 'perfect' ? 'A greaser of a landing. The tower applauds.' : 'Down safe on the strip. Course complete!');
+      endFlight(true, 'MISSION COMPLETE!', event === 'perfect' ? 'A greaser of a landing. The tower applauds.' : 'Down safe on the strip. Mission complete!');
     } else {
       say(event === 'perfect' ? 'PERFECT TOUCHDOWN — refuelled!' : 'Down safe — refuelled on the strip', now, 3);
     }
   }
-  if (event === 'crash') { thud(true); endFlight(false, 'CRASHED', 'The Emberwing is in pieces. Fly gentler next time.'); }
-  if (event === 'ditch') { thud(true); endFlight(false, 'DITCHED', 'You put her in the sea. The island wins this round.'); }
+  if (event === 'crash') {
+    thud(true);
+    crashPuff(state.effects, a.x, a.y - 1, a.z);
+    camera.shake = 2.2;
+    endFlight(false, 'CRASHED', 'The Emberwing is in pieces. Fly gentler next time.');
+  }
+  if (event === 'ditch') {
+    thud(true);
+    splash(state.effects, a.x, 0, a.z);
+    camera.shake = 1.4;
+    endFlight(false, 'DITCHED', 'You put her in the sea. The island wins this round.');
+  }
 
-  if (a.airborne) checkRing(now);
+  if (a.airborne) {
+    if (state.missionId === 'rings') checkRing(now);
+    else if (state.missionId === 'slalom') checkGate(now);
+    else if (state.missionId === 'cargo' && state.dropPressed) {
+      if (dropCrate(state.crate, a)) say('CRATE AWAY!', now, 1.6);
+    }
+  }
+  state.dropPressed = false;
+
+  if (state.missionId === 'cargo') {
+    if (stepCrate(state.crate, dt) === 'landed') {
+      const gained = scoreCrate(state.crate, state.cargoTarget);
+      state.score += gained;
+      ringChime(gained > 600);
+      targetSparkle(state.effects, state.crate.x, state.crate.y, state.crate.z);
+      say(gained > 600 ? `BULLSEYE! Crate +${gained}` : `Crate down ${state.crate.dist} m out +${gained}`, now, 3);
+    }
+  }
+
+  stepCombo(state.combo, dt);
+  emitContinuous(state.effects, a, dt);
+  // Dust streaming off the wheels during the ground roll.
+  if (!a.airborne && a.speed > 9 && !a.crashed) {
+    dustPuff(state.effects, a.x, a.y - 2, a.z + 3, 0.3);
+  }
+
   if (a.airborne) state.timeLeft -= dt;
   if (state.timeLeft <= 0 && state.phase === 'play') {
-    endFlight(false, 'OUT OF TIME', 'The clock beat you. Rings buy seconds — keep moving!');
+    endFlight(false, 'OUT OF TIME', 'The clock beat you. Objectives buy seconds — keep moving!');
   }
   if (a.fuel <= 0 && a.airborne && a.speed < 12) {
     endFlight(false, 'OUT OF FUEL', 'The tank ran dry mid-course. Throttle discipline matters.');
@@ -172,19 +291,20 @@ function stepPlay(dt, now) {
   setEngine(a.throttle, a.airborne);
 }
 
-// Pose the world for a screenshot: title over the runway, mid-flight chase
-// toward a ring, cockpit over the island, or the results screen.
+// Pose the world for a screenshot.
 function setupShot() {
+  const mode = shotMode === 'play' ? 'cover' : shotMode === 'start' ? 'title' : shotMode;
+  if (mode === 'slalom') state.missionId = 'slalom';
+  if (mode === 'cargo') state.missionId = 'cargo';
   resetFlight();
   const a = state.plane;
-  if (shotMode === 'start') {
+  if (mode === 'title') {
     state.phase = 'title';
     a.throttle = 0.35; a.speed = 18;
-    camera.x = 13; camera.y = 18; camera.z = 398; camera.yaw = 0.05; camera.pitch = -0.09;
-  } else if (shotMode === 'play') {
+    // Low three-quarter view: plane on the strip, island behind.
+    camera.x = 11; camera.y = 12.5; camera.z = 376; camera.yaw = 0.04; camera.pitch = -0.13; camera.roll = 0;
+  } else if (mode === 'cover') {
     state.phase = 'play';
-    // On the incoming leg to ring 2, 175 m out and a touch off-centre, so
-    // the gold ring reads beside the banking aircraft, not behind it.
     const ring = state.rings[1];
     a.x = ring.x - Math.sin(ring.heading) * 175 + Math.cos(ring.heading) * 20;
     a.z = ring.z + Math.cos(ring.heading) * 175 + Math.sin(ring.heading) * 20;
@@ -192,19 +312,49 @@ function setupShot() {
     a.speed = 58; a.throttle = 0.8; a.airborne = true; a.fuel = 72;
     state.score = 750; state.timeLeft = 118; state.nextRing = 1; state.ringsDone = 1;
     state.rings[0].done = true;
+    state.combo = { count: 2, mult: 2, timer: 9 };
     say('RING 1 +250', 0, 999);
-  } else if (shotMode === 'cockpit') {
+  } else if (mode === 'cargo') {
+    state.phase = 'play';
+    const t = state.cargoTarget;
+    a.x = t.x - 40; a.z = t.z + 260; a.y = t.y + 95; a.heading = 0; a.pitch = -0.05; a.roll = 0.12;
+    a.speed = 52; a.throttle = 0.7; a.airborne = true; a.fuel = 61;
+    state.score = 0; state.timeLeft = 96;
+    state.crate.state = 'falling';
+    state.crate.x = t.x - 8; state.crate.z = t.z + 30; state.crate.y = t.y + 34;
+    state.crate.vy = -6;
+    say('CRATE AWAY!', 0, 999);
+  } else if (mode === 'cockpit') {
     state.phase = 'play';
     state.cameraMode = 'cockpit'; camera.mode = 'cockpit';
-    // On the incoming leg to ring 5, 260 m out, island spread below.
-    const ring = state.rings[4];
-    a.x = ring.x - Math.sin(ring.heading) * 260;
-    a.z = ring.z + Math.cos(ring.heading) * 260;
-    a.y = ring.y + 10; a.heading = ring.heading; a.pitch = -0.04; a.roll = -0.18;
-    a.speed = 64; a.throttle = 0.72; a.airborne = true; a.fuel = 58;
-    state.score = 1250; state.timeLeft = 96; state.nextRing = 4; state.ringsDone = 4;
-    state.rings.forEach((r, i) => { r.done = i < 4; });
-  } else if (shotMode === 'end') {
+    // On final approach to the strip, threshold markings ahead.
+    a.x = 6; a.z = 1050; a.y = 62; a.heading = 0; a.pitch = -0.06; a.roll = -0.08;
+    a.speed = 34; a.throttle = 0.3; a.airborne = true; a.fuel = 44;
+    state.score = 2750; state.timeLeft = 64; state.nextRing = 12; state.ringsDone = 12;
+    state.rings.forEach((r) => { r.done = true; });
+    say('ALL RINGS! Land on the strip for the bonus', 0, 999);
+  } else if (mode === 'slalom') {
+    state.phase = 'play';
+    const gate = state.gates[2];
+    a.x = gate.x - Math.sin(gate.heading) * 95;
+    a.z = gate.z + Math.cos(gate.heading) * 95;
+    a.y = gate.y + 8; a.heading = gate.heading; a.pitch = 0.0; a.roll = 0.22;
+    a.speed = 58; a.throttle = 0.8; a.airborne = true; a.fuel = 66;
+    state.score = 800; state.timeLeft = 71; state.nextGate = 2; state.gatesDone = 2;
+    state.gates[0].done = true; state.gates[1].done = true;
+    state.combo = { count: 2, mult: 2, timer: 8 };
+    say('GATE 2 +400 (x2)', 0, 999);
+  } else if (mode === 'landing') {
+    state.phase = 'play';
+    // Just touching down on the strip, dust already kicked up.
+    a.x = 0; a.z = 210; a.y = 9.5; a.heading = 0; a.pitch = 0.05; a.roll = 0.02;
+    a.speed = 33; a.throttle = 0.15; a.airborne = true; a.fuel = 38; a.vy = -2.4;
+    state.score = 3400; state.timeLeft = 42; state.nextRing = 11; state.ringsDone = 11;
+    state.rings.forEach((r, i) => { r.done = i < 11; });
+    dustPuff(state.effects, a.x, a.y - 2, a.z + 6, 1.3);
+    dustPuff(state.effects, a.x - 2, a.y - 2, a.z + 12, 1.0);
+    say('PERFECT TOUCHDOWN — refuelled!', 0, 999);
+  } else if (mode === 'end') {
     state.phase = 'end';
     state.won = true;
     state.endLine = 'A greaser of a landing. The tower applauds.';
@@ -232,6 +382,12 @@ function frame(nowMs) {
     state.cameraMode = state.cameraMode === 'chase' ? 'cockpit' : 'chase';
     camera.mode = state.cameraMode;
   }
+  if (state.phase === 'title') {
+    for (const m of MISSIONS) {
+      if (wasPressed(`Digit${m.key}`) || wasPressed(`Numpad${m.key}`)) state.missionId = m.id;
+    }
+  }
+  if (wasPressed('Space') && state.phase === 'play') state.dropPressed = true;
   if (state.phase === 'title' && wasPressed('Enter')) {
     initAudio();
     resetFlight();
@@ -255,26 +411,35 @@ function frame(nowMs) {
   if (state.phase === 'play') stepPlay(dt, now);
   if (state.message && now > state.messageUntil) state.message = '';
 
-  // Clouds drift slowly east.
   for (const c of state.clouds) {
     c.x += c.drift * dt;
     if (c.x > 2800) c.x = -2800;
   }
 
+  stepEffects(state.effects, dt);
+  camera.shake *= Math.pow(0.02, dt);
   camera.mode = state.cameraMode;
-  if (!(shotMode === 'start' || shotMode === 'end')) updateCamera(camera, state.plane, dt);
+  // Only the end-screen pose keeps a hand-placed camera; the title pose
+  // uses the normal chase camera behind the parked plane.
+  const shotStatic = shotMode === 'end';
+  if (!shotStatic) updateCamera(camera, state.plane, dt, now);
   const project = renderScene(ctx, W, H, camera, state, now);
 
-  // Where is the next ring on screen (for the off-screen arrow)?
-  const ring = state.rings[state.nextRing];
-  if (ring) {
-    const p = project(ring.x, ring.y, ring.z);
+  // Where is the next objective on screen (for the off-screen arrow)?
+  const target = state.missionId === 'slalom'
+    ? state.gates[state.nextGate]
+    : state.missionId === 'cargo'
+      ? (state.crate.state === 'loaded' ? state.cargoTarget : null)
+      : state.rings[state.nextRing];
+  if (target) {
+    const ty = target.y !== undefined ? target.y : state.plane.y;
+    const p = project(target.x, ty, target.z);
     state.ringScreen = p
       ? { x: p.x, y: p.y, onScreen: p.x > 0 && p.x < W && p.y > 0 && p.y < H }
       : { x: W / 2, y: 40, onScreen: false };
   } else state.ringScreen = null;
 
-  if (state.phase === 'title') drawTitle(ctx, W, H, state.best);
+  if (state.phase === 'title') drawTitle(ctx, W, H, state);
   else if (state.phase === 'end') { drawHud(ctx, W, H, state); drawEnd(ctx, W, H, state); }
   else if (state.phase === 'pause') { drawHud(ctx, W, H, state); drawPaused(ctx, W, H); }
   else drawHud(ctx, W, H, state);
